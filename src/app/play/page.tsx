@@ -1625,12 +1625,30 @@ function PlayPageClient() {
       const storeName = 'dirHandles';
 
       return new Promise((resolve) => {
-        const request = indexedDB.open(dbName, 1);
+        const request = indexedDB.open(dbName, 2); // 使用版本 2
 
         request.onupgradeneeded = (event) => {
           const db = (event.target as IDBOpenDBRequest).result;
+
+          // 创建 dirHandles 表（如果不存在）
           if (!db.objectStoreNames.contains(storeName)) {
             db.createObjectStore(storeName);
+          }
+
+          // 创建 activeTasks 表（如果不存在）
+          if (!db.objectStoreNames.contains('activeTasks')) {
+            const activeStore = db.createObjectStore('activeTasks', { keyPath: 'id' });
+            activeStore.createIndex('status', 'status', { unique: false });
+            activeStore.createIndex('createdAt', 'createdAt', { unique: false });
+          }
+
+          // 创建 completedTasks 表（如果不存在）
+          if (!db.objectStoreNames.contains('completedTasks')) {
+            const completedStore = db.createObjectStore('completedTasks', { keyPath: 'id' });
+            completedStore.createIndex('source', 'source', { unique: false });
+            completedStore.createIndex('videoId', 'videoId', { unique: false });
+            completedStore.createIndex('completedAt', 'completedAt', { unique: false });
+            completedStore.createIndex('sourceVideoId', ['source', 'videoId'], { unique: false });
           }
         };
 
@@ -1656,6 +1674,17 @@ function PlayPageClient() {
             }
 
             try {
+              // 请求读权限
+              const permission = await (dirHandle as any).queryPermission({ mode: 'read' });
+              if (permission !== 'granted') {
+                const requestPermission = await (dirHandle as any).requestPermission({ mode: 'read' });
+                if (requestPermission !== 'granted') {
+                  console.warn('未获得读权限');
+                  resolve({ hasLocal: false });
+                  return;
+                }
+              }
+
               // 如果有 source、videoId 和 episodeIndex，检查子目录
               if (source && videoId && episodeIndex !== undefined) {
                 const sourceDirHandle = await dirHandle.getDirectoryHandle(source, { create: false });
@@ -1672,6 +1701,7 @@ function PlayPageClient() {
               }
             } catch (error) {
               // 文件不存在
+              console.error('检查本地文件失败:', error);
               resolve({ hasLocal: false });
             }
           };

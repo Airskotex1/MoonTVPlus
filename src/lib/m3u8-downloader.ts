@@ -51,6 +51,7 @@ export interface M3U8DownloadTask {
   source?: string;
   videoId?: string;
   episodeIndex?: number;
+  createdAt?: number; // 创建时间戳
 }
 
 export interface M3U8DownloaderOptions {
@@ -158,6 +159,7 @@ export class M3U8Downloader {
       source: metadata?.source,
       videoId: metadata?.videoId,
       episodeIndex: metadata?.episodeIndex,
+      createdAt: Date.now(),
     };
 
     // 解析 TS 片段

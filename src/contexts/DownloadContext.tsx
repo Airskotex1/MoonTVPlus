@@ -4,6 +4,7 @@ import React, { createContext, useCallback, useContext, useState, useEffect } fr
 
 import { M3U8Downloader, M3U8DownloadTask } from '@/lib/m3u8-downloader';
 import Toast from '@/components/Toast';
+import { downloadDB } from '@/lib/download-db';
 
 interface DownloadContextType {
   downloader: M3U8Downloader;
@@ -62,8 +63,49 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       // 保存任务状态
       saveTasks(downloader.getAllTasks());
     },
-    onComplete: (task) => {
+    onComplete: async (task) => {
       setTasks(downloader.getAllTasks());
+
+      // 只有 filesystem 模式才保存到已完成任务表
+      if (task.downloadMode === 'filesystem' && task.source && task.videoId && task.episodeIndex !== undefined) {
+        try {
+          // 计算文件大小
+          let fileSize: number | undefined;
+          if (task.filesystemDirHandle) {
+            try {
+              const sourceDirHandle = await task.filesystemDirHandle.getDirectoryHandle(task.source, { create: false });
+              const videoIdDirHandle = await sourceDirHandle.getDirectoryHandle(task.videoId, { create: false });
+              const epDirHandle = await videoIdDirHandle.getDirectoryHandle(`ep${task.episodeIndex + 1}`, { create: false });
+
+              let totalSize = 0;
+              for await (const entry of epDirHandle.values()) {
+                if (entry.kind === 'file') {
+                  const fileHandle = entry as FileSystemFileHandle;
+                  const file = await fileHandle.getFile();
+                  totalSize += file.size;
+                }
+              }
+              fileSize = totalSize;
+            } catch (error) {
+              console.error('计算文件大小失败:', error);
+            }
+          }
+
+          await downloadDB.saveCompletedTask({
+            id: task.id,
+            title: task.title,
+            source: task.source,
+            videoId: task.videoId,
+            episodeIndex: task.episodeIndex,
+            completedAt: Date.now(),
+            downloadMode: 'filesystem',
+            fileSize,
+          });
+        } catch (error) {
+          console.error('保存已完成任务失败:', error);
+        }
+      }
+
       // 保存任务状态
       saveTasks(downloader.getAllTasks());
       // 任务完成后，尝试启动下一个等待的任务
@@ -79,46 +121,54 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
     },
   }));
 
-  // 保存任务到 localStorage
-  const saveTasks = useCallback((tasks: M3U8DownloadTask[]) => {
+  // 保存任务到 IndexedDB
+  const saveTasks = useCallback(async (tasks: M3U8DownloadTask[]) => {
     if (typeof window === 'undefined') return;
 
     try {
       // 只保存必要的信息，不保存 ArrayBuffer 等无法序列化的数据
-      const tasksToSave = tasks.map(task => ({
-        id: task.id,
-        url: task.url,
-        title: task.title,
-        type: task.type,
-        status: task.status,
-        finishList: task.finishList,
-        downloadIndex: task.downloadIndex,
-        finishNum: task.finishNum,
-        errorNum: task.errorNum,
-        source: task.source,
-        videoId: task.videoId,
-        episodeIndex: task.episodeIndex,
-        downloadMode: task.downloadMode,
-        rangeDownload: task.rangeDownload,
-        m3u8Content: task.m3u8Content,
-      }));
+      // browser 模式的已完成任务不需要保存
+      const tasksToSave = tasks
+        .filter(task => {
+          // 过滤掉 browser 模式的已完成任务
+          if (task.downloadMode === 'browser' && task.status === 'done') {
+            return false;
+          }
+          return true;
+        })
+        .map(task => ({
+          id: task.id,
+          url: task.url,
+          title: task.title,
+          type: task.type,
+          status: task.status,
+          finishList: task.finishList,
+          downloadIndex: task.downloadIndex,
+          finishNum: task.finishNum,
+          errorNum: task.errorNum,
+          source: task.source,
+          videoId: task.videoId,
+          episodeIndex: task.episodeIndex,
+          downloadMode: task.downloadMode,
+          rangeDownload: task.rangeDownload,
+          m3u8Content: task.m3u8Content,
+          createdAt: task.createdAt || Date.now(),
+        }));
 
-      localStorage.setItem('downloadTasks', JSON.stringify(tasksToSave));
+      await downloadDB.saveActiveTasks(tasksToSave);
     } catch (error) {
       console.error('保存任务失败:', error);
     }
   }, []);
 
-  // 从 localStorage 恢复任务
+  // 从 IndexedDB 恢复任务
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
     const restoreTasks = async () => {
       try {
-        const savedTasks = localStorage.getItem('downloadTasks');
-        if (!savedTasks) return;
-
-        const tasks = JSON.parse(savedTasks);
+        const savedTasks = await downloadDB.getActiveTasks();
+        if (!savedTasks || savedTasks.length === 0) return;
 
         // 读取下载模式和目录句柄
         const downloadMode = localStorage.getItem('downloadMode') as 'browser' | 'filesystem' || 'browser';
@@ -129,7 +179,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
           const storeName = 'dirHandles';
 
           dirHandle = await new Promise<FileSystemDirectoryHandle | undefined>((resolve) => {
-            const request = indexedDB.open(dbName, 1);
+            const request = indexedDB.open(dbName, 2);
 
             request.onsuccess = (event) => {
               const db = (event.target as IDBOpenDBRequest).result;
@@ -162,10 +212,25 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
           });
         }
 
+        // 收集需要删除的任务 ID
+        const tasksToDelete: string[] = [];
+
         // 恢复任务
-        for (const savedTask of tasks) {
-          // 只恢复未完成的任务
-          if (savedTask.status === 'downloading' || savedTask.status === 'pause' || savedTask.status === 'ready') {
+        for (const savedTask of savedTasks) {
+          // browser 模式的任务标记为删除
+          if (savedTask.downloadMode === 'browser') {
+            tasksToDelete.push(savedTask.id);
+            continue;
+          }
+
+          // 已完成的 filesystem 任务标记为删除
+          if (savedTask.downloadMode === 'filesystem' && savedTask.status === 'done') {
+            tasksToDelete.push(savedTask.id);
+            continue;
+          }
+
+          // 只恢复 filesystem 模式的未完成任务
+          if (savedTask.downloadMode === 'filesystem' && (savedTask.status === 'downloading' || savedTask.status === 'pause' || savedTask.status === 'ready')) {
             try {
               const taskId = await downloader.createTask(
                 savedTask.url,
@@ -195,8 +260,19 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
               }
             } catch (error) {
               console.error('恢复任务失败:', savedTask.title, error);
+              // 恢复失败的任务也标记为删除
+              tasksToDelete.push(savedTask.id);
             }
+          } else {
+            // 其他状态的任务标记为删除
+            tasksToDelete.push(savedTask.id);
           }
+        }
+
+        // 批量删除无效任务
+        if (tasksToDelete.length > 0) {
+          console.log('清理无效任务:', tasksToDelete.length, '个');
+          await downloadDB.deleteActiveTasks(tasksToDelete);
         }
 
         setTasks(downloader.getAllTasks());
@@ -231,7 +307,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
           const storeName = 'dirHandles';
 
           const alreadyDownloaded = await new Promise<boolean>((resolve) => {
-            const request = indexedDB.open(dbName, 1);
+            const request = indexedDB.open(dbName, 2);
 
             request.onsuccess = async (event) => {
               const db = (event.target as IDBOpenDBRequest).result;
@@ -282,7 +358,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
           });
 
           if (alreadyDownloaded) {
-            console.log('视频已下载，跳过:', title);
+            console.log('视频已下载（文件系统检查），跳过:', title, metadata);
             setToast({ message: `${title} 已经下载过了，无需重复下载`, type: 'info' });
             return;
           }
@@ -293,6 +369,12 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
 
       const taskId = await downloader.createTask(url, title, type, metadata);
 
+      // 设置下载模式
+      const task = downloader.getTask(taskId);
+      if (task) {
+        task.downloadMode = downloadMode;
+      }
+
       // 如果是 filesystem 模式，从 IndexedDB 读取目录句柄
       if (downloadMode === 'filesystem' && typeof window !== 'undefined') {
         try {
@@ -301,7 +383,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
 
           // 使用 Promise 包装 IndexedDB 操作，确保在启动任务前完成
           await new Promise<void>((resolve, reject) => {
-            const request = indexedDB.open(dbName, 1);
+            const request = indexedDB.open(dbName, 2);
 
             request.onupgradeneeded = (event) => {
               const db = (event.target as IDBOpenDBRequest).result;
@@ -328,14 +410,19 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
               getRequest.onsuccess = () => {
                 const dirHandle = getRequest.result as FileSystemDirectoryHandle | undefined;
                 if (dirHandle) {
-                  // 更新任务的下载模式和目录句柄
+                  // 更新任务的目录句柄
                   const task = downloader.getTask(taskId);
                   if (task) {
-                    task.downloadMode = 'filesystem';
                     task.filesystemDirHandle = dirHandle;
+                    console.log('已设置 filesystem 目录句柄:', dirHandle.name);
                   }
                 } else {
                   console.warn('未找到保存目录，使用浏览器下载模式');
+                  // 如果没有目录句柄，回退到 browser 模式
+                  const task = downloader.getTask(taskId);
+                  if (task) {
+                    task.downloadMode = 'browser';
+                  }
                 }
                 db.close();
                 resolve();

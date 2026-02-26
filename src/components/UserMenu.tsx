@@ -47,6 +47,7 @@ import { NotificationPanel } from './NotificationPanel';
 import { OfflineDownloadPanel } from './OfflineDownloadPanel';
 import { useVersionCheck } from './VersionCheckProvider';
 import { VersionPanel } from './VersionPanel';
+import { DownloadManagementPanel } from './DownloadManagementPanel';
 
 interface AuthInfo {
   username?: string;
@@ -68,6 +69,7 @@ export const UserMenu: React.FC = () => {
   const [isDeviceManagementOpen, setIsDeviceManagementOpen] = useState(false);
   const [isEcoAppsOpen, setIsEcoAppsOpen] = useState(false);
   const [isReportOpen, setIsReportOpen] = useState(false);
+  const [isDownloadManagementOpen, setIsDownloadManagementOpen] = useState(false);
   const [authInfo, setAuthInfo] = useState<AuthInfo | null>(null);
   const [storageType, setStorageType] = useState<string>('localstorage');
   const [mounted, setMounted] = useState(false);
@@ -85,7 +87,7 @@ export const UserMenu: React.FC = () => {
 
   // Body 滚动锁定 - 使用 overflow 方式避免布局问题
   useEffect(() => {
-    if (isSettingsOpen || isChangePasswordOpen || isSubscribeOpen || isOfflineDownloadPanelOpen || isEmailSettingsOpen || isDeviceManagementOpen || isEcoAppsOpen || isReportOpen) {
+    if (isSettingsOpen || isChangePasswordOpen || isSubscribeOpen || isOfflineDownloadPanelOpen || isEmailSettingsOpen || isDeviceManagementOpen || isEcoAppsOpen || isReportOpen || isDownloadManagementOpen) {
       const body = document.body;
       const html = document.documentElement;
 
@@ -975,27 +977,59 @@ export const UserMenu: React.FC = () => {
       // 保存目录句柄到 IndexedDB
       const dbName = 'MoonTVPlus';
       const storeName = 'dirHandles';
-      const request = indexedDB.open(dbName, 1);
 
-      request.onupgradeneeded = (event) => {
-        const db = (event.target as IDBOpenDBRequest).result;
-        if (!db.objectStoreNames.contains(storeName)) {
-          db.createObjectStore(storeName);
-        }
-      };
+      // 使用 Promise 包装 IndexedDB 操作
+      await new Promise<void>((resolve, reject) => {
+        const request = indexedDB.open(dbName, 2); // 使用版本 2，与 download-db.ts 保持一致
 
-      request.onsuccess = (event) => {
-        const db = (event.target as IDBOpenDBRequest).result;
-        const transaction = db.transaction([storeName], 'readwrite');
-        const store = transaction.objectStore(storeName);
-        store.put(dirHandle, 'downloadDir');
-      };
+        request.onupgradeneeded = (event) => {
+          const db = (event.target as IDBOpenDBRequest).result;
 
-      request.onerror = () => {
-        console.error('无法打开 IndexedDB');
-      };
+          // 创建 dirHandles 表（如果不存在）
+          if (!db.objectStoreNames.contains(storeName)) {
+            db.createObjectStore(storeName);
+          }
+
+          // 创建 activeTasks 表（如果不存在）
+          if (!db.objectStoreNames.contains('activeTasks')) {
+            const activeStore = db.createObjectStore('activeTasks', { keyPath: 'id' });
+            activeStore.createIndex('status', 'status', { unique: false });
+            activeStore.createIndex('createdAt', 'createdAt', { unique: false });
+          }
+
+          // 创建 completedTasks 表（如果不存在）
+          if (!db.objectStoreNames.contains('completedTasks')) {
+            const completedStore = db.createObjectStore('completedTasks', { keyPath: 'id' });
+            completedStore.createIndex('source', 'source', { unique: false });
+            completedStore.createIndex('videoId', 'videoId', { unique: false });
+            completedStore.createIndex('completedAt', 'completedAt', { unique: false });
+            completedStore.createIndex('sourceVideoId', ['source', 'videoId'], { unique: false });
+          }
+        };
+
+        request.onsuccess = (event) => {
+          const db = (event.target as IDBOpenDBRequest).result;
+          const transaction = db.transaction([storeName], 'readwrite');
+          const store = transaction.objectStore(storeName);
+          const putRequest = store.put(dirHandle, 'downloadDir');
+
+          putRequest.onsuccess = () => {
+            db.close();
+            resolve();
+          };
+
+          putRequest.onerror = () => {
+            db.close();
+            reject(new Error('保存目录句柄失败'));
+          };
+        };
+
+        request.onerror = () => {
+          reject(new Error('无法打开 IndexedDB'));
+        };
+      });
     } catch (err) {
-      console.error('用户取消选择目录', err);
+      console.error('选择目录失败:', err);
     }
   };
 
@@ -2328,6 +2362,17 @@ export const UserMenu: React.FC = () => {
                         </p>
                       </div>
                     )}
+                  </div>
+
+                  {/* 下载文件管理 */}
+                  <div className='space-y-2'>
+                    <button
+                      onClick={() => setIsDownloadManagementOpen(true)}
+                      className='w-full px-4 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors flex items-center justify-center gap-2'
+                    >
+                      <Package className='w-4 h-4' />
+                      下载文件管理
+                    </button>
                   </div>
                 </div>
               )}
@@ -3672,6 +3717,17 @@ export const UserMenu: React.FC = () => {
           <FavoritesPanel
             isOpen={isFavoritesPanelOpen}
             onClose={() => setIsFavoritesPanelOpen(false)}
+          />,
+          document.body
+        )}
+
+      {/* 使用 Portal 将下载文件管理面板渲染到 document.body */}
+      {isDownloadManagementOpen &&
+        mounted &&
+        createPortal(
+          <DownloadManagementPanel
+            isOpen={isDownloadManagementOpen}
+            onClose={() => setIsDownloadManagementOpen(false)}
           />,
           document.body
         )}
