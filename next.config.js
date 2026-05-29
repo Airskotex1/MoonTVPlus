@@ -1,6 +1,8 @@
 /** @type {import('next').NextConfig} */
 /* eslint-disable @typescript-eslint/no-var-requires */
 
+const { PHASE_DEVELOPMENT_SERVER } = require('next/constants');
+
 // 检测是否为 Cloudflare Pages 构建
 const isCloudflare = process.env.CF_PAGES === '1' || process.env.BUILD_TARGET === 'cloudflare';
 
@@ -9,6 +11,9 @@ const optimizedPackageImports = [
   '@dnd-kit/modifiers',
   '@dnd-kit/sortable',
   '@dnd-kit/utilities',
+  '@heroicons/react',
+  'lucide-react',
+  'react-icons',
 ];
 
 const serverExternalPackages = [
@@ -24,7 +29,10 @@ const serverExternalPackages = [
   'xpath',
 ];
 
-const nextConfig = {
+const createNextConfig = (phase) => {
+  const isDevelopment = phase === PHASE_DEVELOPMENT_SERVER || process.env.NODE_ENV === 'development';
+
+  const nextConfig = {
   // Cloudflare Pages 不支持 standalone，使用默认输出
   output: isCloudflare ? undefined : 'standalone',
   eslint: {
@@ -117,11 +125,17 @@ const nextConfig = {
   },
 };
 
-const withPWA = require('next-pwa')({
-  dest: 'public',
-  disable: process.env.NODE_ENV === 'development',
-  register: true,
-  skipWaiting: true,
-});
+  if (isDevelopment) {
+    return nextConfig;
+  }
 
-module.exports = withPWA(nextConfig);
+  const withPWA = require('next-pwa')({
+    dest: 'public',
+    register: true,
+    skipWaiting: true,
+  });
+
+  return withPWA(nextConfig);
+};
+
+module.exports = createNextConfig;

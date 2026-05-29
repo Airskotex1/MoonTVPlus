@@ -1,7 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any,no-console */
 import bs58 from 'bs58';
 import he from 'he';
-import Hls from 'hls.js';
 
 export type DoubanImageProxyType =
   | 'direct'
@@ -509,6 +508,8 @@ export async function getVideoResolutionFromM3u8(
   bitrate: string; // 视频码率（如 "2.5 Mbps"）
 }> {
   try {
+    const { default: Hls } = await import('hls.js');
+
     // 直接使用m3u8 URL作为视频源，避免CORS问题
     return new Promise((resolve, reject) => {
       const video = document.createElement('video');
